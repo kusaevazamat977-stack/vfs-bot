@@ -1,7 +1,6 @@
 """
 VFS Global Slot Monitor Bot
-Мониторит доступные окна записи на VFS Global (Москва и СПб)
-и публикует в Telegram-канал + рассылает подписчикам.
+Германия, Испания, Франция — Москва и СПб
 """
 
 import asyncio
@@ -9,15 +8,14 @@ import logging
 import os
 import json
 import random
+import httpx
 from datetime import datetime
 from typing import Optional
 
-from playwright.async_api import async_playwright, Page, BrowserContext
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
 
-# ─── Логгер ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=logging.INFO,
@@ -27,25 +25,25 @@ logger = logging.getLogger(__name__)
 # ─── Конфигурация ─────────────────────────────────────────────────────────────
 BOT_TOKEN      = os.getenv("BOT_TOKEN", "8623727460:AAGia4P5xYIPXqz5HR5ZyDTd6K5Qc8syvvs")
 CHANNEL_ID     = os.getenv("CHANNEL_ID", "-1003947723186")
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "900"))  # 15 минут
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "900"))
 
-# Список стран и городов для мониторинга
+# Только 3 страны — Германия, Испания, Франция
 TARGETS = [
-    ("deu", "🇩🇪 Германия",    "moscow",           "Москва"),
-    ("deu", "🇩🇪 Германия",    "saint-petersburg", "Санкт-Петербург"),
-    ("fra", "🇫🇷 Франция",     "moscow",           "Москва"),
-    ("fra", "🇫🇷 Франция",     "saint-petersburg", "Санкт-Петербург"),
-    ("ita", "🇮🇹 Италия",      "moscow",           "Москва"),
-    ("ita", "🇮🇹 Италия",      "saint-petersburg", "Санкт-Петербург"),
-    ("esp", "🇪🇸 Испания",     "moscow",           "Москва"),
-    ("esp", "🇪🇸 Испания",     "saint-petersburg", "Санкт-Петербург"),
-    ("aut", "🇦🇹 Австрия",     "moscow",           "Москва"),
-    ("nld", "🇳🇱 Нидерланды",  "moscow",           "Москва"),
-    ("nld", "🇳🇱 Нидерланды",  "saint-petersburg", "Санкт-Петербург"),
-    ("swe", "🇸🇪 Швеция",      "moscow",           "Москва"),
-    ("fin", "🇫🇮 Финляндия",   "moscow",           "Москва"),
-    ("fin", "🇫🇮 Финляндия",   "saint-petersburg", "Санкт-Петербург"),
-    ("cze", "🇨🇿 Чехия",       "moscow",           "Москва"),
+    ("deu", "🇩🇪 Германия",  "Moscow",           "Москва"),
+    ("deu", "🇩🇪 Германия",  "Saint Petersburg", "Санкт-Петербург"),
+    ("esp", "🇪🇸 Испания",   "Moscow",           "Москва"),
+    ("esp", "🇪🇸 Испания",   "Saint Petersburg", "Санкт-Петербург"),
+    ("fra", "🇫🇷 Франция",   "Moscow",           "Москва"),
+    ("fra", "🇫🇷 Франция",   "Saint Petersburg", "Санкт-Петербург"),
+]
+
+# Разные User-Agent для ротации
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 ]
 
 # ─── Хранилище состояния ──────────────────────────────────────────────────────
@@ -72,128 +70,142 @@ def save_state():
         json.dump(list(subscribers), f)
 
 
-# ─── Playwright: проверка слотов ──────────────────────────────────────────────
+# ─── HTTP парсер с обходом защиты ─────────────────────────────────────────────
 async def check_slots_for_target(
-    context: BrowserContext,
     country_code: str,
-    city_slug: str,
+    city_name: str,
 ) -> Optional[list]:
-    url = f"https://visa.vfsglobal.com/rus/en/{country_code}/book-an-appointment"
-    page: Page = await context.new_page()
-    try:
-        await page.goto(url, wait_until="networkidle", timeout=60_000)
-        await asyncio.sleep(random.uniform(2, 4))
+    """
+    Проверяет доступные слоты через прямые HTTP запросы к VFS API.
+    VFS использует Angular + REST API, перехватываем запросы.
+    """
+    ua = random.choice(USER_AGENTS)
+    
+    # Заголовки максимально похожие на реальный браузер
+    headers = {
+        "User-Agent": ua,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": f"https://visa.vfsglobal.com/rus/en/{country_code}/book-an-appointment",
+        "Origin": "https://visa.vfsglobal.com",
+        "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Connection": "keep-alive",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
 
-        api_dates = []
+    # Известные API endpoints VFS Global
+    api_urls = [
+        # Основной API для получения дат
+        f"https://visa.vfsglobal.com/api/appointment/appointment/get-available-dates"
+        f"?missionCode={country_code.upper()}&locationCode={city_name.replace(' ', '%20')}&categoryCode=TOURVIS",
+        
+        # Альтернативный endpoint
+        f"https://visa.vfsglobal.com/api/appointment/appointment/get-slots"
+        f"?countryCode=RUS&missionCode={country_code.upper()}&centerCode={city_name.replace(' ', '%20')}",
+        
+        # Ещё один вариант
+        f"https://visa.vfsglobal.com/rus/en/{country_code}/appointment/get-available-appointments"
+        f"?locationCode={city_name.replace(' ', '%20')}",
+    ]
 
-        async def handle_response(response):
-            if "appointment" in response.url.lower() and response.status == 200:
-                try:
-                    data = await response.json()
-                    if isinstance(data, list):
-                        for item in data:
-                            d = item.get("appointmentDate") or item.get("date") or item.get("slotDate")
-                            if d:
-                                api_dates.append(str(d)[:10])
-                    elif isinstance(data, dict):
-                        dates = data.get("availableDates") or data.get("dates") or []
-                        for d in dates:
-                            api_dates.append(str(d)[:10])
-                except Exception:
-                    pass
-
-        page.on("response", handle_response)
-
+    async with httpx.AsyncClient(
+        timeout=30,
+        follow_redirects=True,
+        verify=False,  # Некоторые прокси могут иметь проблемы с SSL
+    ) as client:
+        # Сначала делаем запрос на главную страницу для получения cookies
         try:
-            city_selects = await page.query_selector_all("select")
-            for sel in city_selects:
-                options = await sel.inner_html()
-                if city_slug.replace("-", " ").lower() in options.lower():
-                    await sel.select_option(label=city_slug.replace("-", " ").title())
-                    await asyncio.sleep(2)
-                    break
-
-            for btn_text in ["Book an Appointment", "Check Availability", "Book", "Continue"]:
-                btn = await page.query_selector(f"button:has-text('{btn_text}')")
-                if btn:
-                    await btn.click()
-                    await asyncio.sleep(3)
-                    break
+            main_url = f"https://visa.vfsglobal.com/rus/en/{country_code}/book-an-appointment"
+            resp = await client.get(main_url, headers={
+                "User-Agent": ua,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
+            })
+            logger.info(f"Main page status for {country_code}/{city_name}: {resp.status_code}")
+            
+            # Добавляем задержку как реальный пользователь
+            await asyncio.sleep(random.uniform(2, 5))
+            
         except Exception as e:
-            logger.debug(f"UI interaction error for {country_code}/{city_slug}: {e}")
+            logger.warning(f"Main page error {country_code}/{city_name}: {e}")
 
-        await asyncio.sleep(4)
+        # Пробуем все API endpoints
+        for api_url in api_urls:
+            try:
+                resp = await client.get(api_url, headers=headers)
+                logger.info(f"API {api_url[:60]}... status: {resp.status_code}")
+                
+                if resp.status_code == 200:
+                    try:
+                        data = resp.json()
+                        dates = []
+                        
+                        if isinstance(data, list):
+                            for item in data:
+                                d = (item.get("appointmentDate") or 
+                                     item.get("date") or 
+                                     item.get("slotDate") or
+                                     item.get("availableDate"))
+                                if d:
+                                    dates.append(str(d)[:10])
+                        elif isinstance(data, dict):
+                            raw = (data.get("availableDates") or 
+                                   data.get("dates") or 
+                                   data.get("slots") or [])
+                            for d in raw:
+                                if isinstance(d, str):
+                                    dates.append(d[:10])
+                                elif isinstance(d, dict):
+                                    dd = d.get("date") or d.get("appointmentDate")
+                                    if dd:
+                                        dates.append(str(dd)[:10])
+                        
+                        if dates:
+                            logger.info(f"Found {len(dates)} dates for {country_code}/{city_name}")
+                            return sorted(set(dates))
+                        else:
+                            logger.info(f"Empty response for {country_code}/{city_name}")
+                            return []
+                            
+                    except Exception as e:
+                        logger.warning(f"JSON parse error: {e}, body: {resp.text[:200]}")
+                        
+                elif resp.status_code == 403:
+                    logger.warning(f"Blocked by Cloudflare for {country_code}/{city_name}")
+                    return None  # Заблокировано
+                    
+                elif resp.status_code == 404:
+                    continue  # Попробуем следующий endpoint
+                    
+                await asyncio.sleep(random.uniform(1, 3))
+                
+            except Exception as e:
+                logger.warning(f"Request error {api_url[:50]}: {e}")
+                continue
 
-        if api_dates:
-            return sorted(set(api_dates))
-
-        date_cells = await page.query_selector_all(
-            "td.available, td[aria-disabled='false'], .slot-date, "
-            "[class*='available'], [data-date]"
-        )
-        slots_found = []
-        for cell in date_cells:
-            d = await cell.get_attribute("data-date")
-            if not d:
-                d = await cell.inner_text()
-            if d and len(d) >= 6:
-                slots_found.append(d.strip()[:10])
-
-        if slots_found:
-            return sorted(set(slots_found))
-
-        body_text = await page.inner_text("body")
-        if any(phrase in body_text.lower() for phrase in
-               ["no appointment", "no slot", "нет мест", "недоступно", "unavailable"]):
-            return []
-
-        return None
-
-    except Exception as e:
-        logger.warning(f"Error checking {country_code}/{city_slug}: {e}")
-        return None
-    finally:
-        await page.close()
+    return None
 
 
 async def check_all_slots() -> dict:
     results = {}
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="ru-RU",
-            timezone_id="Europe/Moscow",
-            extra_http_headers={"Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8"},
-        )
-        await context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-        )
-
-        for country_code, country_name, city_slug, city_name in TARGETS:
-            key = f"{country_code}_{city_slug}"
-            logger.info(f"Checking {country_name} / {city_name}...")
-            dates = await check_slots_for_target(context, country_code, city_slug)
-            results[key] = {
-                "country_code": country_code,
-                "country_name": country_name,
-                "city_name": city_name,
-                "dates": dates,
-            }
-            await asyncio.sleep(random.uniform(3, 7))
-
-        await browser.close()
+    for country_code, country_name, city_slug, city_name in TARGETS:
+        key = f"{country_code}_{city_slug.replace(' ', '_')}"
+        logger.info(f"Checking {country_name} / {city_name}...")
+        dates = await check_slots_for_target(country_code, city_slug)
+        results[key] = {
+            "country_code": country_code,
+            "country_name": country_name,
+            "city_name": city_name,
+            "dates": dates,
+        }
+        await asyncio.sleep(random.uniform(5, 10))
     return results
 
 
@@ -214,7 +226,7 @@ def format_slots_message(results: dict, changed_only: bool = False) -> Optional[
                 continue
 
         if dates is None:
-            status = "⚠️ <i>сайт недоступен</i>"
+            status = "⚠️ <i>сайт недоступен (Cloudflare)</i>"
         elif len(dates) == 0:
             if not changed_only:
                 status = "🔴 Нет свободных мест"
@@ -268,7 +280,6 @@ async def monitor_loop(bot: Bot):
                         parse_mode=ParseMode.HTML,
                         disable_web_page_preview=True,
                     )
-                    logger.info(f"Posted update to channel for {len(changed)} targets")
 
             if new_slots and subscribers:
                 msg = format_slots_message(new_slots)
@@ -306,9 +317,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(
         "👋 <b>VFS Global Monitor Bot</b>\n\n"
-        "Слежу за доступными окнами записи в визовых центрах VFS Global "
-        "в <b>Москве</b> и <b>Санкт-Петербурге</b> для всех стран.\n\n"
-        "📢 Обновления публикуются в канале каждые 15 мин\n"
+        "Слежу за доступными окнами записи в VFS Global:\n"
+        "🇩🇪 Германия · 🇪🇸 Испания · 🇫🇷 Франция\n"
+        "📍 Москва и Санкт-Петербург\n\n"
+        "📢 Обновления в канале каждые 15 мин\n"
         "🔔 Личные уведомления — нажми «Подписаться»",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -320,7 +332,7 @@ async def cmd_slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if last_known:
         text = format_slots_message(last_known)
         await msg.edit_text(
-            text or "Данных пока нет.",
+            text or "Нет данных.",
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
@@ -329,13 +341,9 @@ async def cmd_slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    subscribers.add(chat_id)
+    subscribers.add(update.effective_chat.id)
     save_state()
-    await update.message.reply_text(
-        "✅ Подписка оформлена!\n"
-        "Пришлю уведомление как только появятся свободные окна."
-    )
+    await update.message.reply_text("✅ Подписка оформлена! Пришлю уведомление при появлении мест.")
 
 
 async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -348,10 +356,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = sum(1 for v in last_known.values() if v.get("dates") and len(v["dates"]) > 0)
     await update.message.reply_text(
         f"📊 <b>Статус бота</b>\n\n"
-        f"• Направлений под мониторингом: {len(TARGETS)}\n"
-        f"• Открытых слотов сейчас: {total}\n"
+        f"• Направлений: {len(TARGETS)}\n"
+        f"• Открытых слотов: {total}\n"
         f"• Подписчиков: {len(subscribers)}\n"
-        f"• Интервал проверки: {CHECK_INTERVAL // 60} мин\n"
+        f"• Интервал: {CHECK_INTERVAL // 60} мин\n"
         f"• Время: {datetime.now().strftime('%d.%m.%Y %H:%M')} МСК",
         parse_mode=ParseMode.HTML,
     )
@@ -373,7 +381,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "subscribe":
         subscribers.add(query.message.chat_id)
         save_state()
-        await query.edit_message_text("✅ Подписка оформлена! Пришлю уведомление при появлении мест.")
+        await query.edit_message_text("✅ Подписка оформлена!")
     elif query.data == "unsubscribe":
         subscribers.discard(query.message.chat_id)
         save_state()
@@ -385,7 +393,7 @@ async def main():
     load_state()
     logger.info(f"Bot token: {BOT_TOKEN[:20]}...")
     logger.info(f"Channel ID: {CHANNEL_ID}")
-    logger.info(f"Check interval: {CHECK_INTERVAL}s")
+    logger.info(f"Targets: {len(TARGETS)}")
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",       cmd_start))
@@ -397,7 +405,6 @@ async def main():
 
     async with app:
         await app.start()
-        # drop_pending_updates + allowed_updates чтобы сбросить старые сессии
         await app.updater.start_polling(
             drop_pending_updates=True,
             allowed_updates=["message", "callback_query"],
@@ -408,7 +415,8 @@ async def main():
 
 if __name__ == "__main__":
     import sys
-    max_retries = 5
+    import time
+    max_retries = 10
     for attempt in range(max_retries):
         try:
             asyncio.run(main())
@@ -416,11 +424,8 @@ if __name__ == "__main__":
         except Exception as e:
             if "Conflict" in str(e):
                 wait = 30 * (attempt + 1)
-                logger.warning(f"Conflict error (attempt {attempt+1}/{max_retries}). Waiting {wait}s...")
-                import time; time.sleep(wait)
+                logger.warning(f"Conflict (attempt {attempt+1}/{max_retries}). Waiting {wait}s...")
+                time.sleep(wait)
             else:
-                logger.error(f"Fatal error: {e}")
+                logger.error(f"Fatal: {e}", exc_info=True)
                 sys.exit(1)
-    else:
-        logger.error("Max retries reached. Exiting.")
-        sys.exit(1)
