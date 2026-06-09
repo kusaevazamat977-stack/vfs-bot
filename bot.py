@@ -25,7 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── Конфигурация ─────────────────────────────────────────────────────────────
-BOT_TOKEN      = os.getenv("BOT_TOKEN", "8824114720:AAERP8yqSsmes4x3Fbzqfbc6yOizr3LxPqQ")
+BOT_TOKEN      = os.getenv("BOT_TOKEN", "8623727460:AAGia4P5xYIPXqz5HR5ZyDTd6K5Qc8syvvs")
 CHANNEL_ID     = os.getenv("CHANNEL_ID", "-1003947723186")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "900"))  # 15 минут
 
