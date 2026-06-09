@@ -397,10 +397,30 @@ async def main():
 
     async with app:
         await app.start()
-        await app.updater.start_polling(drop_pending_updates=True)
+        # drop_pending_updates + allowed_updates чтобы сбросить старые сессии
+        await app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"],
+        )
         logger.info("✅ Bot started! Beginning monitor loop...")
         await monitor_loop(app.bot)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            asyncio.run(main())
+            break
+        except Exception as e:
+            if "Conflict" in str(e):
+                wait = 30 * (attempt + 1)
+                logger.warning(f"Conflict error (attempt {attempt+1}/{max_retries}). Waiting {wait}s...")
+                import time; time.sleep(wait)
+            else:
+                logger.error(f"Fatal error: {e}")
+                sys.exit(1)
+    else:
+        logger.error("Max retries reached. Exiting.")
+        sys.exit(1)
