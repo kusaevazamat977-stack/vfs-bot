@@ -31,7 +31,7 @@ CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "900"))
 
 # Что мониторим: (город_value, город_название, тип_визы_value, тип_визы_название)
 TARGETS = [
-    ("Москва (Толмачевский)", "🏙 Москва",          "Turismo",  "🏖 Туризм"),
+    ("1",  "🏙 Москва",          "13", "🏖 Туризм"),
     ("Москва (Толмачевский)", "🏙 Москва",          "Affari",   "💼 Бизнес"),
     ("Москва (Толмачевский)", "🏙 Москва",          "Invito",   "✉️ Приглашение"),
     ("Санкт-Петербург",       "🏙 Санкт-Петербург", "Turismo",  "🏖 Туризм"),
@@ -86,38 +86,37 @@ async def check_slots(city: str, visa_type: str) -> Optional[list]:
             await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30_000)
             await asyncio.sleep(random.uniform(1, 2))
 
-            # Выбираем город
-            await page.select_option("select[name='city']", label=city)
-            await asyncio.sleep(0.5)
+            # Выбираем город (name='center', value: 1=Москва, 11=СПб, 27=Архангельск)
+            city_val = city
+            await page.select_option("select[name='center']", value=city_val)
+            await asyncio.sleep(1)
 
-            # Выбираем тип визы
-            await page.select_option("select[name='visa_type']", label=visa_type)
+            # Выбираем тип визы (name='vtype')
+            await page.select_option("select[name='vtype']", value=visa_type)
             await asyncio.sleep(0.5)
 
             # Вводим количество заявителей
-            applicants = await page.query_selector("input[name='applicants']")
-            if applicants:
-                await applicants.fill("1")
+            await page.fill("input[name='num_of_person']", "1")
 
-            # Вводим email (фиктивный для проверки)
-            email_fields = await page.query_selector_all("input[type='email']")
-            for ef in email_fields:
-                await ef.fill("test@test.com")
+            # Вводим email
+            await page.fill("input[name='email']", "test@test.com")
+            await page.fill("input[name='emailcheck']", "test@test.com")
 
             # Ставим галочки согласия
-            checkboxes = await page.query_selector_all("input[type='checkbox']")
-            for cb in checkboxes:
-                checked = await cb.is_checked()
-                if not checked:
-                    await cb.check()
+            for cb_name in ["pers_info", "mobil_info"]:
+                cb = await page.query_selector(f"input[name='{cb_name}']")
+                if cb:
+                    checked = await cb.is_checked()
+                    if not checked:
+                        await cb.check()
 
             await asyncio.sleep(0.5)
 
-            # Нажимаем Далее
-            next_btn = await page.query_selector("button[type='submit'], input[type='submit'], .btn-next, button:has-text('Далее')")
+            # Нажимаем Далее (input type='button')
+            next_btn = await page.query_selector("input[type='button'], input[type='submit'], button[type='submit']")
             if next_btn:
                 await next_btn.click()
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
             else:
                 logger.warning(f"Next button not found for {city}/{visa_type}")
                 return None
