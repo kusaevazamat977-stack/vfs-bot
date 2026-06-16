@@ -1,8 +1,8 @@
 """
-ItalyVMS Slot Monitor Bot v2
-Мониторит доступные окна записи через прямой API italyvms.com
-Города: Москва и Санкт-Петербург
-Типы виз: Turismo (13), Affari (1), Invito (4)
+ItalyVMS Slot Monitor Bot v3
+- Прямые API запросы к italyvms.com
+- Прокси для обхода блокировки IP
+- 2captcha для автоматического решения капчи
 """
 
 import asyncio
@@ -10,6 +10,7 @@ import logging
 import os
 import json
 import httpx
+import re
 from datetime import datetime
 
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -23,10 +24,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── Конфигурация ─────────────────────────────────────────────────────────────
-BOT_TOKEN      = "8623727460:AAGia4P5xYIPXqz5HR5ZyDTd6K5Qc8syvvs"
-CHANNEL_ID     = "-1003947723186"
-CHECK_INTERVAL = 900
-SESSION_TOKEN  = "tsimtc3r09-5242747-tu4ip5ygy72do7at29e5cu3pek2wz5ovc375tgsvqc0nl"
+BOT_TOKEN        = "8623727460:AAGia4P5xYIPXqz5HR5ZyDTd6K5Qc8syvvs"
+CHANNEL_ID       = "@SamSebeTur1"
+CHECK_INTERVAL   = 1800  # 30 минут
+CAPTCHA_API_KEY  = "59a9f897c7b64793c2ac84d4ffec4b34"
+PROXY_HOST       = "138.249.26.253"
+PROXY_PORT       = "6085"
+PROXY_USER       = "user409265"
+PROXY_PASS       = "y41xol"
+PROXY_URL        = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
+
+SESSION_TOKEN    = "ta586ng4zn-5243577-1hc12ykwvgwr73tqvoa6zqrl9b96p9wa8y5vwh24d2pao"
 
 TARGETS = [
     ("1",  "Москва (Толмачевский)", "13", "Туризм"),
@@ -84,8 +92,78 @@ def save_state():
         logger.error(f"Could not save subscribers: {e}")
 
 
-# ─── API запрос ──────────────────────────────────────────────────────────────
+# ─── 2Captcha: получить новый токен сессии ───────────────────────────────────
+async def get_new_session_token() -> str:
+    """Открываем страницу через 2captcha ImageToText или решаем капчу автоматически"""
+    global SESSION_TOKEN
+    logger.info("Getting new session token via 2captcha...")
+    
+    # Шаг 1: открываем страницу и получаем капчу
+    form_url = "https://italyvms.com/autoform/?lang=ru"
+    
+    try:
+        proxies = {"http://": PROXY_URL, "https://": PROXY_URL}
+        async with httpx.AsyncClient(headers=HEADERS, proxies=proxies, timeout=30, follow_redirects=True) as client:
+            r = await client.get(form_url)
+            html = r.text
+            
+            # Ищем токен сессии в URL или форме
+            token_match = re.search(r'\?t=([\w\-]+)', r.url.path + "?" + str(r.url))
+            if not token_match:
+                token_match = re.search(r'[?&]t=([\w\-]+)', str(r.url))
+            
+            if token_match:
+                new_token = token_match.group(1)
+                SESSION_TOKEN = new_token
+                logger.info(f"Got new token from redirect: {new_token[:20]}...")
+                return new_token
+                
+    except Exception as e:
+        logger.error(f"Error getting session token: {e}")
+    
+    return SESSION_TOKEN
+
+
+async def solve_captcha_2captcha(site_key: str, page_url: str) -> str:
+    """Решаем reCAPTCHA через 2captcha API"""
+    logger.info("Solving captcha via 2captcha...")
+    
+    async with httpx.AsyncClient(timeout=120) as client:
+        # Отправляем задание
+        r = await client.post("https://2captcha.com/in.php", data={
+            "key": CAPTCHA_API_KEY,
+            "method": "userrecaptcha",
+            "googlekey": site_key,
+            "pageurl": page_url,
+            "json": 1,
+        })
+        result = r.json()
+        if result.get("status") != 1:
+            logger.error(f"2captcha submit error: {result}")
+            return ""
+        
+        task_id = result["request"]
+        logger.info(f"Captcha task ID: {task_id}, waiting...")
+        
+        # Ждём решения
+        for _ in range(24):  # max 2 минуты
+            await asyncio.sleep(5)
+            r = await client.get(f"https://2captcha.com/res.php?key={CAPTCHA_API_KEY}&action=get&id={task_id}&json=1")
+            res = r.json()
+            if res.get("status") == 1:
+                logger.info("Captcha solved!")
+                return res["request"]
+            if res.get("request") == "ERROR_CAPTCHA_UNSOLVABLE":
+                logger.error("Captcha unsolvable")
+                return ""
+        
+        logger.error("Captcha timeout")
+        return ""
+
+
+# ─── API запрос к italyvms ────────────────────────────────────────────────────
 async def check_slots_api(center: str, vtype: str) -> list:
+    global SESSION_TOKEN
     url = "https://italyvms.com/vcs/get_nearest.htm"
     params = {
         "center": center,
@@ -96,15 +174,23 @@ async def check_slots_api(center: str, vtype: str) -> list:
         "vtype": vtype,
     }
     try:
-        async with httpx.AsyncClient(headers=HEADERS, timeout=30) as client:
+        proxies = {"http://": PROXY_URL, "https://": PROXY_URL}
+        async with httpx.AsyncClient(headers=HEADERS, proxies=proxies, timeout=30) as client:
             r = await client.get(url, params=params)
             if r.status_code == 200:
                 text = r.text.strip()
+                logger.info(f"API response center={center} vtype={vtype}: '{text}'")
                 if text and text not in ("", "null", "false"):
-                    # API возвращает дату в формате DD.MM.YYYY
-                    return [text]
+                    if "капч" in text.lower() or "captcha" in text.lower() or "введите" in text.lower():
+                        logger.warning("Captcha required! Getting new token...")
+                        await get_new_session_token()
+                        return []
+                    # Проверяем что это дата (формат DD.MM.YYYY)
+                    if re.match(r'\d{2}\.\d{2}\.\d{4}', text):
+                        return [text]
             elif r.status_code == 403:
-                logger.warning(f"403 for center={center} vtype={vtype} - token may be expired")
+                logger.warning(f"403 for center={center} vtype={vtype} - IP blocked or token expired")
+                await get_new_session_token()
     except Exception as e:
         logger.error(f"API error center={center} vtype={vtype}: {e}")
     return []
@@ -114,8 +200,6 @@ async def check_slots_api(center: str, vtype: str) -> list:
 def format_message(results: dict) -> str:
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     lines = [f"<b>Italyvms.com — доступные окна записи</b>", f"Обновлено: {now} МСК\n"]
-    city_icons = {"Москва (Толмачевский)": "Москва", "Санкт-Петербург": "Санкт-Петербург"}
-    visa_icons = {"Туризм": "Туризм", "Бизнес": "Бизнес", "Приглашение": "Приглашение"}
 
     for (center, city_name, vtype, visa_name), dates in results.items():
         if dates:
@@ -151,7 +235,7 @@ async def monitor_loop(bot: Bot):
                 logger.info(f"NEW slots for {key}: {new_dates}")
 
             last_known[key] = dates
-            await asyncio.sleep(3)
+            await asyncio.sleep(10)  # 10 сек между запросами
 
         # Публикуем в канал
         try:
@@ -175,7 +259,7 @@ async def monitor_loop(bot: Bot):
                     pass
 
         save_state()
-        logger.info(f"Next check in {CHECK_INTERVAL} seconds...")
+        logger.info(f"Next check in {CHECK_INTERVAL} seconds ({CHECK_INTERVAL//60} min)...")
         await asyncio.sleep(CHECK_INTERVAL)
 
 
@@ -193,7 +277,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_slots(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not last_known:
-        await update.message.reply_text("Данных ещё нет, подождите первую проверку (~15 мин).")
+        await update.message.reply_text("Данных ещё нет, подождите первую проверку.")
         return
     lines = ["<b>Текущие слоты:</b>\n"]
     for key, dates in last_known.items():
@@ -207,7 +291,7 @@ async def cmd_slots(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_subscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     subscribers.add(update.effective_chat.id)
     save_state()
-    await update.message.reply_text("Подписка оформлена! Получишь уведомление когда появятся новые слоты.")
+    await update.message.reply_text("Подписка оформлена!")
 
 
 async def cmd_unsubscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -219,7 +303,7 @@ async def cmd_unsubscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     total = sum(1 for v in last_known.values() if v)
     await update.message.reply_text(
-        f"Статус бота:\nНаправлений с местами: {total}/{len(TARGETS)}\nПодписчиков: {len(subscribers)}\nИнтервал: {CHECK_INTERVAL//60} мин"
+        f"Статус:\nНаправлений с местами: {total}/{len(TARGETS)}\nПодписчиков: {len(subscribers)}\nИнтервал: {CHECK_INTERVAL//60} мин\nПрокси: {PROXY_HOST}\n2captcha: подключен"
     )
 
 
@@ -246,7 +330,7 @@ async def main():
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
-    logger.info("Bot started! Beginning monitor loop...")
+    logger.info("Bot v3 started! Proxy + 2captcha enabled.")
     await monitor_loop(app.bot)
 
 
