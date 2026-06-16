@@ -265,18 +265,21 @@ def make_link(center: str, vtype: str) -> str:
 
 def format_message(results: dict) -> str:
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    lines = [f"<b>Italyvms.com — доступные окна записи</b>", f"Обновлено: {now} МСК\n"]
+    lines = [f"<b>Italyvms.com — доступные окна zapisи</b>", f"Обновлено: {now} МСК
+"]
+    has_slots = False
     for (center, city_name, vtype, visa_name), dates in results.items():
-        link = make_link(center, vtype)
         if dates:
+            has_slots = True
+            link = make_link(center, vtype)
             lines.append(f"<b>{city_name} / {visa_name}</b>")
             lines.append(f"Дата: {' * '.join(dates)}")
-            lines.append(f'<a href="{link}">Записаться</a>\n')
-        else:
-            lines.append(f"<b>{city_name} / {visa_name}</b>")
-            lines.append(f"Нет свободных мест")
-            lines.append(f'<a href="{link}">Записаться</a>\n')
-    return "\n".join(lines)
+            lines.append(f'<a href="{link}">Записаться</a>
+')
+    if not has_slots:
+        lines.append("Свободных мест нет. Следующая проверка через 30 минут.")
+    return "
+".join(lines)
 
 
 # ─── Основной цикл ────────────────────────────────────────────────────────────
@@ -344,16 +347,21 @@ async def monitor_loop(bot: Bot):
         if token_expired:
             continue
 
-        try:
-            msg = format_message(results)
-            await bot.send_message(
-                chat_id=CHANNEL_ID, text=msg,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
-            logger.info("Published to channel")
-        except Exception as e:
-            logger.error(f"Channel error: {e}")
+        # Публикуем только если есть свободные места
+        has_any_slots = any(dates for dates in results.values())
+        if has_any_slots:
+            try:
+                msg = format_message(results)
+                await bot.send_message(
+                    chat_id=CHANNEL_ID, text=msg,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                logger.info("Published to channel")
+            except Exception as e:
+                logger.error(f"Channel error: {e}")
+        else:
+            logger.info("No slots available, skipping channel post")
 
         if changed and subscribers:
             for chat_id in list(subscribers):
@@ -381,12 +389,25 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_slots(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not last_known:
-        await update.message.reply_text("Данных ещё нет.")
+        await update.message.reply_text("Данных ещё нет, подождите первую проверку.")
         return
     lines = ["<b>Текущие слоты:</b>\n"]
+    has_slots = False
+    kb_buttons = []
     for key, dates in last_known.items():
-        lines.append(f"{key}: {', '.join(dates) if dates else 'нет мест'}")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        if dates:
+            has_slots = True
+            # Находим center и vtype для ссылки
+            for (center, city_name, vtype, visa_name) in TARGETS:
+                if f"{city_name}/{visa_name}" == key:
+                    link = make_link(center, vtype)
+                    lines.append(f"<b>{key}</b>: {', '.join(dates)}")
+                    kb_buttons.append([InlineKeyboardButton(f"Записаться: {key}", url=link)])
+                    break
+    if not has_slots:
+        lines.append("Свободных мест нет.")
+    kb = InlineKeyboardMarkup(kb_buttons) if kb_buttons else None
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 async def cmd_token(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
