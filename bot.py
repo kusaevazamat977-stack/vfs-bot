@@ -265,7 +265,7 @@ def make_link(center: str, vtype: str) -> str:
 
 def format_message(results: dict) -> str:
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    lines = [f"<b>Italyvms.com — доступные окна zapisи</b>", f"Обновлено: {now} МСК
+    lines = [f"<b>Italyvms.com — доступные окна записи</b>", f"Обновлено: {now} МСК
 "]
     has_slots = False
     for (center, city_name, vtype, visa_name), dates in results.items():
