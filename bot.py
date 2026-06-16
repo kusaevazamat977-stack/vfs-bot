@@ -134,20 +134,26 @@ async def check_slots_api(center: str, vtype: str) -> list:
 
 
 # ─── Форматирование сообщения ─────────────────────────────────────────────────
+def make_link(center: str, vtype: str, token: str) -> str:
+    return f"https://italyvms.com/autoform/?t={token}&lang=ru&center={center}&vtype={vtype}"
+
+
 def format_message(results: dict) -> str:
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     lines = [f"<b>Italyvms.com — доступные окна записи</b>", f"Обновлено: {now} МСК\n"]
 
     for (center, city_name, vtype, visa_name), dates in results.items():
+        link = make_link(center, vtype, SESSION_TOKEN)
         if dates:
             dates_str = " * ".join(dates)
             lines.append(f"<b>{city_name} / {visa_name}</b>")
-            lines.append(f"Дата: {dates_str}\n")
+            lines.append(f"Дата: {dates_str}")
+            lines.append(f'<a href="{link}">Записаться</a>\n')
         else:
             lines.append(f"<b>{city_name} / {visa_name}</b>")
-            lines.append(f"Нет свободных мест\n")
+            lines.append(f"Нет свободных мест")
+            lines.append(f'<a href="{link}">Записаться</a>\n')
 
-    lines.append('<a href="https://italyvms.com/autoform/?lang=ru">Записаться на italyvms.com</a>')
     return "\n".join(lines)
 
 
