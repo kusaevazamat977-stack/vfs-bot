@@ -320,9 +320,28 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     if q.data == "slots":
-        await cmd_slots(update, ctx)
+        if not last_known:
+            await q.edit_message_text("Dannyh eshche net.")
+            return
+        lines = ["<b>Tekushchie sloty:</b>\n"]
+        kb_buttons = []
+        has_slots = False
+        for (center, city_name, vtype, visa_name) in TARGETS:
+            key = city_name + "/" + visa_name
+            dates = last_known.get(key, [])
+            if dates:
+                has_slots = True
+                link = make_link(center, vtype)
+                lines.append("<b>" + key + "</b>: " + ", ".join(dates))
+                kb_buttons.append([InlineKeyboardButton("Zapisatsya: " + key, url=link)])
+        if not has_slots:
+            lines.append("Svobodnyh mest net.")
+        kb = InlineKeyboardMarkup(kb_buttons) if kb_buttons else None
+        await q.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb)
     elif q.data == "subscribe":
-        await cmd_subscribe(update, ctx)
+        subscribers.add(update.effective_chat.id)
+        save_state()
+        await q.edit_message_text("Podpiska oformlena! Poluchish uvedomlenie kogda poyavyatsya novye okna.")
 
 async def main():
     load_state()
