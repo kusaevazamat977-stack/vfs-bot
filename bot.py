@@ -165,13 +165,16 @@ async def get_token_via_playwright() -> str:
                 await asyncio.sleep(1)
                 await page.fill("input[name='num_of_person']", "1")
                 await page.fill("input[name='email']", "201007azik@mail.ru")
+                await page.fill("input[name='emailcheck']", "201007azik@mail.ru")
+                await asyncio.sleep(0.5)
 
                 # Чекбоксы
                 for cb in await page.query_selector_all("input[type='checkbox']"):
                     await cb.check()
+                await asyncio.sleep(0.5)
 
-                await page.click("input[type='button'][value*='Далее'], button[type='submit']")
-                await asyncio.sleep(2)
+                await page.click("input[type='button']")
+                await asyncio.sleep(3)
             except Exception as e:
                 logger.warning(f"Form fill error: {e}")
 
