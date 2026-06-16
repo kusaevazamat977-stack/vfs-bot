@@ -91,61 +91,71 @@ async def get_token_via_playwright() -> str:
                 viewport={"width": 1280, "height": 800}
             )
             page = await context.new_page()
-            # Load page and wait for it
-            await page.goto("https://italyvms.com/autoform/?lang=ru", timeout=60000)
-            await page.wait_for_load_state("domcontentloaded", timeout=30000)
-            await asyncio.sleep(5)
-            # Wait for select element to appear
-            try:
-                await page.wait_for_selector("select[name='center']", timeout=20000)
-            except Exception:
-                logger.warning("select[name=center] not found after waiting")
+            new_token_found = []
 
-            # Try filling the form with JS directly
+            def handle_response(response):
+                url = response.url
+                m = re.search(r'[?&]t=([\w\-]+)', url)
+                if m and len(m.group(1)) > 20:
+                    new_token_found.append(m.group(1))
+
+            page.on("response", handle_response)
+            await page.goto("https://italyvms.com/autoform/?lang=ru", timeout=60000)
+            await asyncio.sleep(5)
+
+            if new_token_found:
+                new_token = new_token_found[-1]
+                logger.info(f"Got token from network: {new_token[:20]}...")
+                SESSION_TOKEN = new_token
+                token_expired = False
+                save_state()
+                await browser.close()
+                return new_token
+
+            current_url = page.url
+            logger.info(f"Current URL: {current_url}")
+            m = re.search(r'[?&]t=([\w\-]+)', current_url)
+            if m:
+                new_token = m.group(1)
+                logger.info(f"Got token from URL: {new_token[:20]}...")
+                SESSION_TOKEN = new_token
+                token_expired = False
+                save_state()
+                await browser.close()
+                return new_token
+
             try:
-                await page.evaluate("""
-                    document.querySelector("select[name='center']").value = '1';
-                    document.querySelector("select[name='center']").dispatchEvent(new Event('change'));
-                """)
-                await asyncio.sleep(2)
-                await page.evaluate("""
-                    document.querySelector("select[name='vtype']").value = '13';
-                    document.querySelector("select[name='vtype']").dispatchEvent(new Event('change'));
-                """)
-                await asyncio.sleep(1)
-                await page.evaluate("""
-                    document.querySelector("input[name='num_of_person']").value = '1';
-                    document.querySelector("input[name='email']").value = '201007azik@mail.ru';
-                    document.querySelector("input[name='emailcheck']").value = '201007azik@mail.ru';
-                    document.querySelectorAll("input[type='checkbox']").forEach(cb => cb.checked = true);
-                """)
-                await asyncio.sleep(1)
-                await page.click("input[type='button']")
-                await asyncio.sleep(4)
+                center_select = await page.query_selector("select[name='center']")
+                if center_select:
+                    await page.select_option("select[name='center']", "1")
+                    await asyncio.sleep(1)
+                    await page.select_option("select[name='vtype']", "13")
+                    await asyncio.sleep(1)
+                    await page.fill("input[name='num_of_person']", "1")
+                    await page.fill("input[name='email']", "201007azik@mail.ru")
+                    await page.fill("input[name='emailcheck']", "201007azik@mail.ru")
+                    for cb in await page.query_selector_all("input[type='checkbox']"):
+                        await cb.check()
+                    await asyncio.sleep(0.5)
+                    await page.click("input[type='button']")
+                    await asyncio.sleep(4)
+                    current_url = page.url
+                    m = re.search(r'[?&]t=([\w\-]+)', current_url)
+                    if m:
+                        new_token = m.group(1)
+                        SESSION_TOKEN = new_token
+                        token_expired = False
+                        save_state()
+                        await browser.close()
+                        return new_token
             except Exception as e:
                 logger.warning(f"Form fill error: {e}")
 
-            for _ in range(5):
-                current_url = page.url
-                logger.info(f"Current URL: {current_url}")
-                token_match = re.search(r'[?&]t=([\w\-]+)', current_url)
-                if token_match:
-                    new_token = token_match.group(1)
-                    logger.info(f"Got token: {new_token[:20]}...")
-                    SESSION_TOKEN = new_token
-                    token_expired = False
-                    save_state()
-                    await browser.close()
-                    return new_token
-                try:
-                    await page.click("input[type='button']")
-                    await asyncio.sleep(2)
-                except Exception:
-                    break
             await browser.close()
     except Exception as e:
         logger.error(f"Playwright error: {e}")
     return ""
+
 
 async def check_slots_api(center: str, vtype: str) -> list:
     global token_expired
