@@ -92,9 +92,10 @@ async def get_token_via_playwright() -> str:
                 viewport={"width": 1280, "height": 800}
             )
             page = await context.new_page()
-            await page.goto("https://italyvms.com/autoform/?lang=ru", timeout=30000)
-            await page.wait_for_load_state("networkidle", timeout=15000)
+            await page.goto("https://italyvms.com/autoform/?lang=ru", timeout=60000)
+            await page.wait_for_load_state("networkidle", timeout=30000)
             try:
+                await page.wait_for_selector("select[name='center']", timeout=30000)
                 await page.select_option("select[name='center']", "1")
                 await asyncio.sleep(1)
                 await page.select_option("select[name='vtype']", "13")
