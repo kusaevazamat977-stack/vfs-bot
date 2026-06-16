@@ -84,7 +84,6 @@ async def get_token_via_playwright() -> str:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                proxy={"server": f"http://{PROXY_HOST}:{PROXY_PORT}", "username": PROXY_USER, "password": PROXY_PASS},
                 args=["--no-sandbox"]
             )
             context = await browser.new_context(
