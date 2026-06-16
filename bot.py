@@ -91,22 +91,32 @@ async def get_token_via_playwright() -> str:
                 viewport={"width": 1280, "height": 800}
             )
             page = await context.new_page()
+            # Load page and wait for it
             await page.goto("https://italyvms.com/autoform/?lang=ru", timeout=60000)
-            await page.wait_for_load_state("networkidle", timeout=30000)
+            await page.wait_for_load_state("domcontentloaded", timeout=30000)
+            await asyncio.sleep(3)
+
+            # Try filling the form with JS directly
             try:
-                await page.wait_for_selector("select[name='center']", timeout=30000)
-                await page.select_option("select[name='center']", "1")
+                await page.evaluate("""
+                    document.querySelector("select[name='center']").value = '1';
+                    document.querySelector("select[name='center']").dispatchEvent(new Event('change'));
+                """)
+                await asyncio.sleep(2)
+                await page.evaluate("""
+                    document.querySelector("select[name='vtype']").value = '13';
+                    document.querySelector("select[name='vtype']").dispatchEvent(new Event('change'));
+                """)
                 await asyncio.sleep(1)
-                await page.select_option("select[name='vtype']", "13")
+                await page.evaluate("""
+                    document.querySelector("input[name='num_of_person']").value = '1';
+                    document.querySelector("input[name='email']").value = '201007azik@mail.ru';
+                    document.querySelector("input[name='emailcheck']").value = '201007azik@mail.ru';
+                    document.querySelectorAll("input[type='checkbox']").forEach(cb => cb.checked = true);
+                """)
                 await asyncio.sleep(1)
-                await page.fill("input[name='num_of_person']", "1")
-                await page.fill("input[name='email']", "201007azik@mail.ru")
-                await page.fill("input[name='emailcheck']", "201007azik@mail.ru")
-                for cb in await page.query_selector_all("input[type='checkbox']"):
-                    await cb.check()
-                await asyncio.sleep(0.5)
                 await page.click("input[type='button']")
-                await asyncio.sleep(3)
+                await asyncio.sleep(4)
             except Exception as e:
                 logger.warning(f"Form fill error: {e}")
 
@@ -122,11 +132,10 @@ async def get_token_via_playwright() -> str:
                     save_state()
                     await browser.close()
                     return new_token
-                next_btn = await page.query_selector("input[type='button']")
-                if next_btn:
-                    await next_btn.click()
+                try:
+                    await page.click("input[type='button']")
                     await asyncio.sleep(2)
-                else:
+                except Exception:
                     break
             await browser.close()
     except Exception as e:
