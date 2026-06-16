@@ -94,7 +94,12 @@ async def get_token_via_playwright() -> str:
             # Load page and wait for it
             await page.goto("https://italyvms.com/autoform/?lang=ru", timeout=60000)
             await page.wait_for_load_state("domcontentloaded", timeout=30000)
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
+            # Wait for select element to appear
+            try:
+                await page.wait_for_selector("select[name='center']", timeout=20000)
+            except Exception:
+                logger.warning("select[name=center] not found after waiting")
 
             # Try filling the form with JS directly
             try:
