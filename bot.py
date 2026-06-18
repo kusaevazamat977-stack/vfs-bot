@@ -15,7 +15,18 @@ BOT_TOKEN      = "8572069793:AAHQ42H2b6D9QD5e-HaBGs3EM0DmEAFXlOo"
 CHANNEL_ID     = "@SamSebeTur1"
 ADMIN_ID       = 1020509234
 CAPTCHA_KEY    = "59a9f897c7b64793c2ac84d4ffec4b34"
-PROXY_HTTP     = "http://user409265:y41xol@138.249.26.253:6085"
+PROXIES = [
+    "http://user409265:y41xol@138.249.26.253:6085",
+    "http://user409265:y41xol@193.33.67.76:3390",
+    "http://user409265:y41xol@45.85.67.188:3390",
+]
+proxy_index = 0
+
+def get_proxy() -> str:
+    global proxy_index
+    proxy = PROXIES[proxy_index % len(PROXIES)]
+    proxy_index += 1
+    return proxy
 CHECK_INTERVAL = 1800   # 30 минут
 STATE_FILE     = "C:\\vfs_bot\\last_slots.json"
 
@@ -257,13 +268,15 @@ def extract_token_from_url(url: str) -> str | None:
 # ─── API: проверяем слоты ─────────────────────────────────────────────────────
 async def check_slots(token: str) -> dict:
     results = {}
-    async with httpx.AsyncClient(
-        proxies={"http://": PROXY_HTTP, "https://": PROXY_HTTP},
-        headers=HEADERS,
-        timeout=30,
-        verify=False,
-    ) as client:
-        for t in TARGETS:
+    for t in TARGETS:
+        proxy = get_proxy()
+        log.info(f"Using proxy: {proxy.split('@')[1]}")
+        async with httpx.AsyncClient(
+            proxies={"http://": proxy, "https://": proxy},
+            headers=HEADERS,
+            timeout=30,
+            verify=False,
+        ) as client:
             url = (f"https://italyvms.com/vcs/get_nearest.htm"
                    f"?center={t['center']}&persons=1&urgent=0"
                    f"&token={token}&lang=ru&vtype={t['vtype']}")
@@ -277,7 +290,6 @@ async def check_slots(token: str) -> dict:
                 elif "записи нет" in text or not text or text == "[]":
                     results[t["label"]] = []
                 else:
-                    # Парсим даты
                     dates = re.findall(r"\d{2}\.\d{2}\.\d{4}", text)
                     results[t["label"]] = dates if dates else []
             except Exception as e:
