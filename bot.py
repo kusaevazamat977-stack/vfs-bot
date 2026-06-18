@@ -113,14 +113,77 @@ def extract_token_from_url(url):
     m = re.search(r"[?&]t=([^&]{10,})", url)
     return m.group(1) if m else None
 
+async def solve_click_captcha(page) -> bool:
+    """Решаем кликабельную капчу через 2captcha ClickCaptcha метод."""
+    try:
+        # Делаем скриншот всей страницы с капчей
+        screenshot = await page.screenshot(full_page=False)
+        img_b64 = base64.b64encode(screenshot).decode()
+        
+        log.info("2captcha: sending click captcha...")
+        async with httpx.AsyncClient(timeout=120) as client:
+            # Отправляем как обычную image captcha с инструкцией
+            resp = await client.post("http://2captcha.com/in.php", data={
+                "key": CAPTCHA_KEY,
+                "method": "base64",
+                "body": img_b64,
+                "json": 1,
+                "lang": "ru",
+                "textinstructions": "Выберите все изображения которые соответствуют описанию и нажмите далее",
+            })
+            data = resp.json()
+            if data.get("status") != 1:
+                log.warning(f"2captcha submit failed: {data}")
+                return False
+            
+            captcha_id = data["request"]
+            log.info(f"2captcha: captcha sent id={captcha_id}")
+            
+            # Ждём решения
+            for _ in range(30):
+                await asyncio.sleep(5)
+                res = await client.get(
+                    f"http://2captcha.com/res.php?key={CAPTCHA_KEY}&action=get&id={captcha_id}&json=1"
+                )
+                rdata = res.json()
+                if rdata.get("status") == 1:
+                    # Получили координаты для клика
+                    answer = rdata["request"]
+                    log.info(f"2captcha solved: {answer}")
+                    
+                    # Парсим координаты x1,y1,x2,y2...
+                    if "click:" in answer.lower():
+                        coords_str = answer.lower().replace("click:", "")
+                        pairs = coords_str.split(";")
+                        for pair in pairs:
+                            if "," in pair:
+                                x, y = pair.strip().split(",")
+                                await page.mouse.click(int(x), int(y))
+                                await asyncio.sleep(0.5)
+                        return True
+                    else:
+                        # Просто текстовый ответ — ищем кнопку Далее
+                        log.info(f"2captcha text answer: {answer}")
+                        return True
+                        
+                if rdata.get("request") not in ["CAPCHA_NOT_READY", "ERROR_CAPTCHA_UNSOLVABLE"]:
+                    log.warning(f"2captcha error: {rdata}")
+                    return False
+                    
+    except Exception as e:
+        log.error(f"solve_click_captcha error: {e}")
+    return False
+
 async def get_token_via_playwright():
     log.info("Playwright: getting new token...")
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+                user_agent=random.choice(USER_AGENTS),
+                viewport={"width": 1280, "height": 800}
             )
+            
             await page.goto("https://italyvms.com/autoform/?lang=ru", wait_until="domcontentloaded", timeout=60000)
             await asyncio.sleep(3)
 
@@ -129,6 +192,7 @@ async def get_token_via_playwright():
                 await browser.close()
                 return token
 
+            # Заполняем форму
             try:
                 await page.wait_for_selector("select[name='center']", timeout=10000)
                 await page.select_option("select[name='center']", "1")
@@ -144,6 +208,7 @@ async def get_token_via_playwright():
                 if btn:
                     await btn.click()
                 await asyncio.sleep(3)
+                log.info(f"Playwright: form submitted, URL={page.url}")
             except Exception as e:
                 log.info(f"Form fill skipped: {e}")
 
@@ -152,23 +217,38 @@ async def get_token_via_playwright():
                 await browser.close()
                 return token
 
-            for selector in ["img.captcha", "img[src*='captcha']", ".captcha img"]:
-                img = await page.query_selector(selector)
-                if img:
-                    img_bytes = await img.screenshot()
-                    answer = await solve_image_captcha(base64.b64encode(img_bytes).decode())
-                    if answer:
-                        inp = await page.query_selector("input[name='captcha'],input[id*='captcha']")
-                        if inp:
-                            await inp.fill(answer)
-                        btn = await page.query_selector("input[type='button'],input[type='submit']")
-                        if btn:
-                            await btn.click()
-                        await asyncio.sleep(3)
-                        token = extract_token_from_url(page.url)
-                        if token:
-                            await browser.close()
-                            return token
+            # Ищем капчу и решаем через 2captcha
+            for attempt in range(3):
+                log.info(f"Playwright: looking for captcha (attempt {attempt+1})...")
+                await asyncio.sleep(2)
+                
+                # Проверяем наличие капчи на странице
+                page_text = await page.inner_text("body")
+                if "Выберите все изображения" in page_text or "капча" in page_text.lower():
+                    log.info("Playwright: captcha found! Solving via 2captcha...")
+                    
+                    # Решаем капчу
+                    solved = await solve_click_captcha(page)
+                    await asyncio.sleep(2)
+                    
+                    # Ищем кнопку Далее и нажимаем
+                    for btn_sel in ["input[type='button'][value*='ал']", "input[type='submit']", "button"]:
+                        try:
+                            btn = await page.query_selector(btn_sel)
+                            if btn:
+                                await btn.click()
+                                await asyncio.sleep(3)
+                                break
+                        except Exception:
+                            pass
+                    
+                    token = extract_token_from_url(page.url)
+                    if token:
+                        log.info(f"Playwright: got token after captcha!")
+                        await browser.close()
+                        return token
+                else:
+                    log.info("Playwright: no captcha on page")
                     break
 
             await browser.close()
