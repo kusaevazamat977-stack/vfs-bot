@@ -14,7 +14,7 @@ BOT_TOKEN      = "8572069793:AAHQ42H2b6D9QD5e-HaBGs3EM0DmEAFXlOo"
 CHANNEL_ID     = "@SamSebeTur1"
 ADMIN_ID       = 1020509234
 CAPTCHA_KEY    = "59a9f897c7b64793c2ac84d4ffec4b34"
-CHECK_INTERVAL = 1800
+CHECK_INTERVAL = 300
 STATE_FILE     = "C:\\vfs_bot\\last_slots.json"
 
 PROXIES = [
@@ -39,12 +39,28 @@ TARGETS = [
     {"center": 11, "vtype": 4,  "label": "СПб / Приглашение"},
 ]
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
-    "Referer": "https://italyvms.com/",
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "X-Requested-With": "XMLHttpRequest",
-}
+import random
+import time
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+]
+
+def get_headers():
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Referer": "https://italyvms.com/",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept-Language": random.choice(["ru-RU,ru;q=0.9", "ru,en;q=0.8", "ru-RU,ru;q=0.8,en-US;q=0.5"]),
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+    }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -80,7 +96,7 @@ async def solve_image_captcha(image_base64):
             captcha_id = data["request"]
             log.info(f"2captcha: sent id={captcha_id}")
             for _ in range(24):
-                await asyncio.sleep(5)
+                await asyncio.sleep(random.uniform(8, 20))
                 res = await client.get(f"http://2captcha.com/res.php?key={CAPTCHA_KEY}&action=get&id={captcha_id}&json=1")
                 rdata = res.json()
                 if rdata.get("status") == 1:
@@ -170,7 +186,7 @@ async def check_slots(token):
         try:
             async with httpx.AsyncClient(
                 proxies={"http://": proxy, "https://": proxy},
-                headers=HEADERS, timeout=30, verify=False,
+                headers=get_headers(), timeout=30, verify=False,
             ) as client:
                 url = (f"https://italyvms.com/vcs/get_nearest.htm"
                        f"?center={t['center']}&persons=1&urgent=0"
@@ -188,7 +204,7 @@ async def check_slots(token):
         except Exception as e:
             log.warning(f"  -> error: {e}")
             results[t["label"]] = []
-        await asyncio.sleep(5)
+        await asyncio.sleep(random.uniform(8, 20))
     return results
 
 # ─── PUBLISH ──────────────────────────────────────────────────────────────────
