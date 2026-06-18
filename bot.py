@@ -84,7 +84,7 @@ async def solve_image_captcha(image_base64):
                 res = await client.get(f"http://2captcha.com/res.php?key={CAPTCHA_KEY}&action=get&id={captcha_id}&json=1")
                 rdata = res.json()
                 if rdata.get("status") == 1:
-                    log.info(f"2captcha: solved -> {rdata['request']}")
+                    log.info(f"2captcha: solved!")
                     return rdata["request"]
                 if rdata.get("request") != "CAPCHA_NOT_READY":
                     return None
@@ -136,7 +136,6 @@ async def get_token_via_playwright():
                 await browser.close()
                 return token
 
-            # Ищем капчу
             for selector in ["img.captcha", "img[src*='captcha']", ".captcha img"]:
                 img = await page.query_selector(selector)
                 if img:
@@ -210,60 +209,60 @@ async def publish_slots(bot, state, new_slots):
         except Exception as e:
             log.error(f"Publish error: {e}")
 
-# ─── MONITOR LOOP ─────────────────────────────────────────────────────────────
-async def monitor_loop(app):
-    await asyncio.sleep(10)  # Ждём пока polling стартует
+# ─── JOB: мониторинг через JobQueue ──────────────────────────────────────────
+captcha_fails = 0
+
+async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    global captcha_fails
+    log.info("=== Slot check ===")
     state = load_state()
-    bot = app.bot
-    captcha_fails = 0
+    bot = context.bot
+    token = state.get("token", "")
 
-    while True:
-        log.info("=== Starting slot check ===")
-        token = state.get("token", "")
-        results = await check_slots(token)
+    results = await check_slots(token)
 
-        captcha_count = sum(1 for v in results.values() if v == "CAPTCHA")
-        if captcha_count > 0:
-            log.info(f"Captcha on {captcha_count} endpoints, auto-renewing...")
-            new_token = await get_token_via_playwright()
-            if new_token:
-                state["token"] = new_token
-                save_state(state)
-                captcha_fails = 0
-                log.info(f"Token renewed: {new_token[:30]}...")
-                results = await check_slots(new_token)
-            else:
-                captcha_fails += 1
-                if captcha_fails >= 3:
-                    try:
-                        await bot.send_message(ADMIN_ID,
-                            "⚠️ Не удалось обновить токен!\n\n"
-                            "1. Зайди на https://italyvms.com/autoform/?lang=ru\n"
-                            "2. Заполни форму до дат\n"
-                            "3. Отправь: /token НОВЫЙ\\_ТОКЕН",
-                            parse_mode="Markdown")
-                    except Exception:
-                        pass
-                    captcha_fails = 0
-
-        old_slots = state.get("slots", {})
-        new_found = {}
-        for label, dates in results.items():
-            if dates == "CAPTCHA":
-                continue
-            if isinstance(dates, list) and dates and dates != old_slots.get(label, []):
-                new_found[label] = dates
-
-        if new_found:
-            await publish_slots(bot, state, new_found)
-            for label, dates in new_found.items():
-                state["slots"][label] = dates
+    captcha_count = sum(1 for v in results.values() if v == "CAPTCHA")
+    if captcha_count > 0:
+        log.info(f"Captcha on {captcha_count} endpoints, auto-renewing...")
+        new_token = await get_token_via_playwright()
+        if new_token:
+            state["token"] = new_token
             save_state(state)
+            captcha_fails = 0
+            log.info(f"Token renewed!")
+            results = await check_slots(new_token)
         else:
-            log.info("No new slots.")
+            captcha_fails += 1
+            log.warning(f"Token renewal failed ({captcha_fails}/3)")
+            if captcha_fails >= 3:
+                try:
+                    await bot.send_message(ADMIN_ID,
+                        "⚠️ Не удалось обновить токен!\n\n"
+                        "1. Зайди на https://italyvms.com/autoform/?lang=ru\n"
+                        "2. Заполни форму до дат\n"
+                        "3. Отправь: /token НОВЫЙ\\_ТОКЕН",
+                        parse_mode="Markdown")
+                except Exception:
+                    pass
+                captcha_fails = 0
 
-        log.info(f"Next check in {CHECK_INTERVAL//60} min...")
-        await asyncio.sleep(CHECK_INTERVAL)
+    old_slots = state.get("slots", {})
+    new_found = {}
+    for label, dates in results.items():
+        if dates == "CAPTCHA":
+            continue
+        if isinstance(dates, list) and dates and dates != old_slots.get(label, []):
+            new_found[label] = dates
+
+    if new_found:
+        await publish_slots(bot, state, new_found)
+        for label, dates in new_found.items():
+            state["slots"][label] = dates
+        save_state(state)
+    else:
+        log.info("No new slots.")
+
+    log.info(f"Next check in {CHECK_INTERVAL//60} min...")
 
 # ─── COMMANDS ─────────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -336,17 +335,19 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
-    log.info("Bot v7 started!")
-    app = Application.builder().token(BOT_TOKEN).build()
+    log.info("Bot v8 started! JobQueue + Proxy rotation + 2captcha")
+    app = (Application.builder()
+           .token(BOT_TOKEN)
+           .build())
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("token", cmd_token))
     app.add_handler(CommandHandler("check", cmd_check))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    async def post_init(application):
-        asyncio.create_task(monitor_loop(application))
+    # Запускаем мониторинг через JobQueue — без Conflict!
+    app.job_queue.run_repeating(monitor_job, interval=CHECK_INTERVAL, first=10)
 
-    app.post_init = post_init
     app.run_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])
 
 if __name__ == "__main__":
