@@ -468,7 +468,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("Вы уже подписаны.")
 
 # ─── MAIN ──────────────────────────────────────────────────────────────────────
-async def main():
+def main():
     log.info("Bot v6 started! Playwright + 2captcha + Proxy enabled.")
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
@@ -476,16 +476,20 @@ async def main():
     app.add_handler(CommandHandler("check", cmd_check))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
+    # Запускаем monitor_loop как job через job_queue
+    async def monitor_job(context):
+        await monitor_loop(context.application)
 
-    try:
-        await monitor_loop(app)
-    finally:
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+    # Запуск мониторинга через post_init чтобы не конфликтовать с polling
+    async def post_init(application):
+        # Задержка 5 секунд чтобы polling успел стартовать
+        await asyncio.sleep(5)
+        asyncio.create_task(monitor_loop(application))
+
+    app.post_init = post_init
+
+    # Запускаем polling — он сам управляет event loop
+    app.run_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
