@@ -209,11 +209,6 @@ async def get_token_via_playwright(bot=None):
             except Exception as e:
                 log.warning(f"Ошибка заполнения формы: {e}")
 
-            token = extract_token_from_url(page.url)
-            if token:
-                await browser.close()
-                return token
-
             # ── Проверяем нужен ли код подтверждения ──
             page_text = await page.inner_text("body")
             needs_code = any(w in page_text.lower() for w in ["код", "code", "подтвер", "confirm"])
