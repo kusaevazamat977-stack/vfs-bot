@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import re
-import base64
+import random
 import httpx
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -13,9 +13,9 @@ from playwright.async_api import async_playwright
 BOT_TOKEN      = "8572069793:AAHQ42H2b6D9QD5e-HaBGs3EM0DmEAFXlOo"
 CHANNEL_ID     = "@SamSebeTur1"
 ADMIN_ID       = 1020509234
-CAPTCHA_KEY    = "59a9f897c7b64793c2ac84d4ffec4b34"
-CHECK_INTERVAL = 300
+CHECK_INTERVAL = 300   # секунды между проверками
 STATE_FILE     = "C:\\vfs_bot\\last_slots.json"
+FORM_EMAIL     = "info@italyvms.ru"   # email для формы (можно свой)
 
 PROXIES = [
     "http://user409265:y41xol@138.249.26.253:6085",
@@ -31,24 +31,19 @@ def get_proxy():
     return proxy
 
 TARGETS = [
-    {"center": 1,  "vtype": 13, "label": "Москва / Туризм"},
-    {"center": 1,  "vtype": 1,  "label": "Москва / Бизнес"},
-    {"center": 1,  "vtype": 4,  "label": "Москва / Приглашение"},
-    {"center": 11, "vtype": 13, "label": "СПб / Туризм"},
-    {"center": 11, "vtype": 1,  "label": "СПб / Бизнес"},
-    {"center": 11, "vtype": 4,  "label": "СПб / Приглашение"},
+    {"center": "1",  "vtype": "13", "label": "Москва / Туризм"},
+    {"center": "1",  "vtype": "1",  "label": "Москва / Бизнес"},
+    {"center": "1",  "vtype": "4",  "label": "Москва / Приглашение"},
+    {"center": "11", "vtype": "13", "label": "СПб / Туризм"},
+    {"center": "11", "vtype": "1",  "label": "СПб / Бизнес"},
+    {"center": "11", "vtype": "4",  "label": "СПб / Приглашение"},
 ]
-
-import random
-import time
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
 ]
 
 def get_headers():
@@ -57,7 +52,7 @@ def get_headers():
         "Referer": "https://italyvms.com/",
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "X-Requested-With": "XMLHttpRequest",
-        "Accept-Language": random.choice(["ru-RU,ru;q=0.9", "ru,en;q=0.8", "ru-RU,ru;q=0.8,en-US;q=0.5"]),
+        "Accept-Language": "ru-RU,ru;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
     }
@@ -82,179 +77,157 @@ def save_state(state):
     except Exception as e:
         log.warning(f"Save state error: {e}")
 
-# ─── 2CAPTCHA ─────────────────────────────────────────────────────────────────
-async def solve_image_captcha(image_base64):
-    try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post("http://2captcha.com/in.php", data={
-                "key": CAPTCHA_KEY, "method": "base64",
-                "body": image_base64, "json": 1,
-            })
-            data = resp.json()
-            if data.get("status") != 1:
-                return None
-            captcha_id = data["request"]
-            log.info(f"2captcha: sent id={captcha_id}")
-            for _ in range(24):
-                await asyncio.sleep(random.uniform(8, 20))
-                res = await client.get(f"http://2captcha.com/res.php?key={CAPTCHA_KEY}&action=get&id={captcha_id}&json=1")
-                rdata = res.json()
-                if rdata.get("status") == 1:
-                    log.info(f"2captcha: solved!")
-                    return rdata["request"]
-                if rdata.get("request") != "CAPCHA_NOT_READY":
-                    return None
-    except Exception as e:
-        log.error(f"2captcha error: {e}")
-    return None
-
-# ─── PLAYWRIGHT ───────────────────────────────────────────────────────────────
+# ─── PLAYWRIGHT: ПОЛУАВТОМАТИЧЕСКОЕ ОБНОВЛЕНИЕ ТОКЕНА ────────────────────────
 def extract_token_from_url(url):
     m = re.search(r"[?&]t=([^&]{10,})", url)
     return m.group(1) if m else None
 
-async def solve_click_captcha(page) -> bool:
-    """Решаем кликабельную капчу через 2captcha ClickCaptcha метод."""
-    try:
-        # Делаем скриншот всей страницы с капчей
-        screenshot = await page.screenshot(full_page=False)
-        img_b64 = base64.b64encode(screenshot).decode()
-        
-        log.info("2captcha: sending click captcha...")
-        async with httpx.AsyncClient(timeout=120) as client:
-            # Отправляем как обычную image captcha с инструкцией
-            resp = await client.post("http://2captcha.com/in.php", data={
-                "key": CAPTCHA_KEY,
-                "method": "base64",
-                "body": img_b64,
-                "json": 1,
-                "lang": "ru",
-                "textinstructions": "Выберите все изображения которые соответствуют описанию и нажмите далее",
-            })
-            data = resp.json()
-            if data.get("status") != 1:
-                log.warning(f"2captcha submit failed: {data}")
-                return False
-            
-            captcha_id = data["request"]
-            log.info(f"2captcha: captcha sent id={captcha_id}")
-            
-            # Ждём решения
-            for _ in range(30):
-                await asyncio.sleep(5)
-                res = await client.get(
-                    f"http://2captcha.com/res.php?key={CAPTCHA_KEY}&action=get&id={captcha_id}&json=1"
-                )
-                rdata = res.json()
-                if rdata.get("status") == 1:
-                    # Получили координаты для клика
-                    answer = rdata["request"]
-                    log.info(f"2captcha solved: {answer}")
-                    
-                    # Парсим координаты x1,y1,x2,y2...
-                    if "click:" in answer.lower():
-                        coords_str = answer.lower().replace("click:", "")
-                        pairs = coords_str.split(";")
-                        for pair in pairs:
-                            if "," in pair:
-                                x, y = pair.strip().split(",")
-                                await page.mouse.click(int(x), int(y))
-                                await asyncio.sleep(0.5)
-                        return True
-                    else:
-                        # Просто текстовый ответ — ищем кнопку Далее
-                        log.info(f"2captcha text answer: {answer}")
-                        return True
-                        
-                if rdata.get("request") not in ["CAPCHA_NOT_READY", "ERROR_CAPTCHA_UNSOLVABLE"]:
-                    log.warning(f"2captcha error: {rdata}")
-                    return False
-                    
-    except Exception as e:
-        log.error(f"solve_click_captcha error: {e}")
-    return False
+async def get_token_via_playwright(bot=None):
+    """
+    Полуавтоматическое обновление токена:
+    - Бот открывает браузер и заполняет форму сам
+    - Тебе остаётся только пройти капчу и нажать Далее
+    - Бот поймает новый токен из URL автоматически
+    """
+    log.info("Playwright: открываю браузер для обновления токена...")
 
-async def get_token_via_playwright():
-    log.info("Playwright: getting new token...")
+    # Уведомляем администратора что открываем браузер
+    if bot:
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                "🔄 *Токен истёк — открываю браузер...*\n\n"
+                "Я заполню форму автоматически.\n"
+                "Тебе останется только *пройти капчу* и нажать *Далее*.\n\n"
+                "⏳ Жди следующего сообщения...",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            log.warning(f"Notify error: {e}")
+
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page(
+            # headless=False — открываем ВИДИМЫЙ браузер
+            browser = await p.chromium.launch(headless=False, args=["--start-maximized"])
+            context = await browser.new_context(
                 user_agent=random.choice(USER_AGENTS),
                 viewport={"width": 1280, "height": 800}
             )
-            
-            await page.goto("https://italyvms.com/autoform/?lang=ru", wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(3)
+            page = await context.new_page()
 
+            # Переходим на форму
+            await page.goto("https://italyvms.com/autoform/?lang=ru",
+                            wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(2)
+
+            # Проверяем — может токен уже в URL
             token = extract_token_from_url(page.url)
             if token:
+                log.info(f"Playwright: токен сразу в URL!")
                 await browser.close()
                 return token
 
-            # Заполняем форму
+            # ── Автоматически заполняем форму ──
             try:
-                await page.wait_for_selector("select[name='center']", timeout=10000)
-                await page.select_option("select[name='center']", "1")
-                await asyncio.sleep(1)
-                await page.select_option("select[name='vtype']", "13")
+                await page.wait_for_selector("select[name='center']", timeout=15000)
+
+                await page.select_option("select[name='center']", "1")   # Москва
+                await asyncio.sleep(0.5)
+                await page.select_option("select[name='vtype']", "13")   # Туризм
+                await asyncio.sleep(0.5)
+
                 await page.fill("input[name='num_of_person']", "1")
-                await page.fill("input[name='email']", "test@italyvms.ru")
-                await page.fill("input[name='emailcheck']", "test@italyvms.ru")
+                await page.fill("input[name='email']", FORM_EMAIL)
+                await page.fill("input[name='emailcheck']", FORM_EMAIL)
+
+                # Ставим галочки (согласие с условиями)
                 for cb in await page.query_selector_all("input[type='checkbox']"):
                     if not await cb.is_checked():
                         await cb.check()
-                btn = await page.query_selector("input[type='button']")
-                if btn:
-                    await btn.click()
-                await asyncio.sleep(3)
-                log.info(f"Playwright: form submitted, URL={page.url}")
-            except Exception as e:
-                log.info(f"Form fill skipped: {e}")
+                        await asyncio.sleep(0.3)
 
+                # Нажимаем кнопку Далее
+                for sel in ["input[type='button']", "input[type='submit']", "button[type='submit']"]:
+                    btn = await page.query_selector(sel)
+                    if btn:
+                        await btn.click()
+                        break
+
+                await asyncio.sleep(2)
+                log.info(f"Playwright: форма заполнена, URL={page.url[:80]}")
+
+            except Exception as e:
+                log.warning(f"Playwright: ошибка заполнения формы: {e}")
+
+            # Проверяем токен после заполнения
             token = extract_token_from_url(page.url)
             if token:
+                log.info(f"Playwright: токен получен после формы!")
                 await browser.close()
                 return token
 
-            # Ищем капчу и решаем через 2captcha
-            for attempt in range(3):
-                log.info(f"Playwright: looking for captcha (attempt {attempt+1})...")
+            # ── Ждём пока человек пройдёт капчу ──
+            log.info("Playwright: форма открыта, жду прохождения капчи человеком...")
+
+            if bot:
+                try:
+                    await bot.send_message(
+                        ADMIN_ID,
+                        "✅ *Форма заполнена автоматически!*\n\n"
+                        "👀 *Посмотри на экран — браузер уже открыт.*\n\n"
+                        "Тебе нужно:\n"
+                        "1. Пройти капчу (выбери картинки)\n"
+                        "2. Нажать *Далее*\n\n"
+                        "⏳ Жду 5 минут — токен подхвачу автоматически.",
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    log.warning(f"Notify error: {e}")
+
+            # Polling URL каждые 2 секунды до 5 минут
+            for _ in range(150):  # 150 × 2 сек = 5 минут
                 await asyncio.sleep(2)
-                
-                # Проверяем наличие капчи на странице
-                page_text = await page.inner_text("body")
-                if "Выберите все изображения" in page_text or "капча" in page_text.lower():
-                    log.info("Playwright: captcha found! Solving via 2captcha...")
-                    
-                    # Решаем капчу
-                    solved = await solve_click_captcha(page)
-                    await asyncio.sleep(2)
-                    
-                    # Ищем кнопку Далее и нажимаем
-                    for btn_sel in ["input[type='button'][value*='ал']", "input[type='submit']", "button"]:
-                        try:
-                            btn = await page.query_selector(btn_sel)
-                            if btn:
-                                await btn.click()
-                                await asyncio.sleep(3)
-                                break
-                        except Exception:
-                            pass
-                    
-                    token = extract_token_from_url(page.url)
-                    if token:
-                        log.info(f"Playwright: got token after captcha!")
-                        await browser.close()
-                        return token
-                else:
-                    log.info("Playwright: no captcha on page")
-                    break
+                current_url = page.url
+                token = extract_token_from_url(current_url)
+                if token:
+                    log.info(f"Playwright: поймал токен после капчи!")
+                    await browser.close()
+                    return token
+
+            # Timeout — человек не прошёл капчу за 5 минут
+            log.warning("Playwright: таймаут 5 минут, токен не получен")
+            if bot:
+                try:
+                    await bot.send_message(
+                        ADMIN_ID,
+                        "⏰ *Таймаут!* Капча не была пройдена за 5 минут.\n\n"
+                        "Зайди вручную:\n"
+                        "1. Открой https://italyvms.com/autoform/?lang=ru\n"
+                        "2. Заполни форму, пройди капчу\n"
+                        "3. Скопируй URL и отправь: `/token ТВОЙ_URL`",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
 
             await browser.close()
             return None
+
     except Exception as e:
         log.error(f"Playwright error: {e}")
+        if bot:
+            try:
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"❌ Ошибка браузера: `{e}`\n\n"
+                    "Обнови токен вручную:\n"
+                    "1. Открой https://italyvms.com/autoform/?lang=ru\n"
+                    "2. Заполни форму, пройди капчу\n"
+                    "3. Отправь: `/token ТВОЙ_URL_ИЛИ_ТОКЕН`",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
         return None
 
 # ─── SLOTS ────────────────────────────────────────────────────────────────────
@@ -273,18 +246,21 @@ async def check_slots(token):
                        f"&token={token}&lang=ru&vtype={t['vtype']}")
                 resp = await client.get(url)
                 text = resp.text.strip()
-                log.info(f"  -> {text[:60]!r}")
+                log.info(f"  -> {text[:80]!r}")
+
                 if "капчу" in text or "captcha" in text.lower():
                     results[t["label"]] = "CAPTCHA"
-                elif "нет" in text.lower() or not text or text == "[]":
+                elif not text or text == "[]" or "нет" in text.lower():
                     results[t["label"]] = []
                 else:
                     dates = re.findall(r"\d{2}\.\d{2}\.\d{4}", text)
                     results[t["label"]] = dates if dates else []
+
         except Exception as e:
             log.warning(f"  -> error: {e}")
             results[t["label"]] = []
-        await asyncio.sleep(random.uniform(8, 20))
+
+        await asyncio.sleep(random.uniform(5, 12))
     return results
 
 # ─── PUBLISH ──────────────────────────────────────────────────────────────────
@@ -296,58 +272,63 @@ async def publish_slots(bot, state, new_slots):
         dates = new_slots.get(label, [])
         if isinstance(dates, list) and dates:
             url = f"https://italyvms.com/autoform/?t={token}&lang=ru"
-            lines.append(f"🟢 *{label}*\nДата: {', '.join(dates)}\n[Записаться]({url})")
+            lines.append(f"🟢 *{label}*\nДаты: {', '.join(dates)}\n[➡️ Записаться]({url})")
+
     if lines:
-        msg = "🇮🇹 *Доступные окна на визу Италии:*\n\n" + "\n\n".join(lines)
+        msg = "🇮🇹 *Свободные окна на визу Италии:*\n\n" + "\n\n".join(lines)
         try:
-            await bot.send_message(CHANNEL_ID, msg, parse_mode="Markdown", disable_web_page_preview=True)
+            await bot.send_message(
+                CHANNEL_ID, msg,
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
             log.info("Published to channel ✅")
         except Exception as e:
             log.error(f"Publish error: {e}")
 
-# ─── JOB: мониторинг через JobQueue ──────────────────────────────────────────
-captcha_fails = 0
+# ─── JOB: мониторинг ──────────────────────────────────────────────────────────
+token_renewal_in_progress = False
 
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
-    global captcha_fails
+    global token_renewal_in_progress
     log.info("=== Slot check ===")
     state = load_state()
     bot = context.bot
     token = state.get("token", "")
 
+    if not token:
+        log.warning("Нет токена! Запускаю обновление...")
+        if not token_renewal_in_progress:
+            token_renewal_in_progress = True
+            new_token = await get_token_via_playwright(bot)
+            token_renewal_in_progress = False
+            if new_token:
+                state["token"] = new_token
+                save_state(state)
+                token = new_token
+            else:
+                return
+
     results = await check_slots(token)
 
     captcha_count = sum(1 for v in results.values() if v == "CAPTCHA")
-    if captcha_count > 0:
-        log.info(f"Captcha on {captcha_count} endpoints, auto-renewing...")
-        new_token = await get_token_via_playwright()
-        if new_token:
-            state["token"] = new_token
-            save_state(state)
-            captcha_fails = 0
-            log.info(f"Token renewed!")
-            results = await check_slots(new_token)
-        else:
-            captcha_fails += 1
-            log.warning(f"Token renewal failed ({captcha_fails}/3)")
-            if captcha_fails >= 3:
-                try:
-                    await bot.send_message(ADMIN_ID,
-                        "⚠️ Не удалось обновить токен!\n\n"
-                        "1. Зайди на https://italyvms.com/autoform/?lang=ru\n"
-                        "2. Заполни форму до дат\n"
-                        "3. Отправь: /token НОВЫЙ\\_ТОКЕН",
-                        parse_mode="Markdown")
-                except Exception:
-                    pass
-                captcha_fails = 0
+    if captcha_count >= 3:
+        log.info(f"Капча на {captcha_count} направлениях — обновляю токен...")
+        if not token_renewal_in_progress:
+            token_renewal_in_progress = True
+            new_token = await get_token_via_playwright(bot)
+            token_renewal_in_progress = False
+            if new_token:
+                state["token"] = new_token
+                save_state(state)
+                results = await check_slots(new_token)
 
     old_slots = state.get("slots", {})
     new_found = {}
     for label, dates in results.items():
         if dates == "CAPTCHA":
             continue
-        if isinstance(dates, list) and dates and dates != old_slots.get(label, []):
+        if isinstance(dates, list) and dates and set(dates) != set(old_slots.get(label, [])):
             new_found[label] = dates
 
     if new_found:
@@ -355,94 +336,139 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
         for label, dates in new_found.items():
             state["slots"][label] = dates
         save_state(state)
+        log.info(f"Опубликованы новые слоты: {list(new_found.keys())}")
     else:
-        log.info("No new slots.")
+        log.info("Новых слотов нет.")
 
-    log.info(f"Next check in {CHECK_INTERVAL//60} min...")
+    log.info(f"Следующая проверка через {CHECK_INTERVAL//60} мин...")
 
 # ─── COMMANDS ─────────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb = [[
         InlineKeyboardButton("📅 Текущие слоты", callback_data="slots"),
-        InlineKeyboardButton("🔔 Подписаться", callback_data="subscribe"),
+        InlineKeyboardButton("🔄 Обновить токен", callback_data="renew_token"),
     ]]
     await update.message.reply_text(
-        "🇮🇹 *VFS Italy Monitor*\n\nМониторинг свободных окон на запись.",
-        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+        "🇮🇹 *VFS Italy Monitor v9*\n\n"
+        "Мониторинг свободных окон на запись в визовый центр Италии.\n\n"
+        "Команды:\n"
+        "/check — проверить прямо сейчас\n"
+        "/token URL\_ИЛИ\_ТОКЕН — обновить токен вручную\n"
+        "/status — статус бота",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
 
 async def cmd_token(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     if not ctx.args:
-        await update.message.reply_text("Использование: /token ТОКЕН_ИЛИ_URL")
+        await update.message.reply_text(
+            "Использование:\n"
+            "`/token ТОКЕН` — вставить токен\n"
+            "`/token https://italyvms.com/autoform/?t=...` — вставить URL целиком",
+            parse_mode="Markdown"
+        )
         return
     raw = ctx.args[0]
     token = extract_token_from_url(raw) or raw
     state = load_state()
     state["token"] = token
     save_state(state)
-    await update.message.reply_text(f"✅ Токен обновлён:\n`{token}`", parse_mode="Markdown")
+    await update.message.reply_text(
+        f"✅ Токен обновлён!\n\n`{token[:40]}...`",
+        parse_mode="Markdown"
+    )
 
 async def cmd_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    await update.message.reply_text("🔄 Проверяю...")
+    msg = await update.message.reply_text("🔄 Проверяю слоты...")
     state = load_state()
     results = await check_slots(state.get("token", ""))
     lines = []
     for t in TARGETS:
         v = results.get(t["label"], [])
         if v == "CAPTCHA":
-            lines.append(f"⚠️ {t['label']}: Капча")
+            lines.append(f"⚠️ {t['label']}: нужна капча")
         elif isinstance(v, list) and v:
             lines.append(f"🟢 {t['label']}: {', '.join(v)}")
         else:
-            lines.append(f"🔴 {t['label']}: Нет мест")
-    await update.message.reply_text("\n".join(lines))
+            lines.append(f"🔴 {t['label']}: нет мест")
+    await msg.edit_text("\n".join(lines))
+
+async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    state = load_state()
+    token = state.get("token", "")
+    token_preview = f"`{token[:30]}...`" if token else "❌ Нет токена"
+    slots_count = sum(1 for v in state.get("slots", {}).values() if v)
+    await update.message.reply_text(
+        f"📊 *Статус бота v9*\n\n"
+        f"Токен: {token_preview}\n"
+        f"Направлений со слотами: {slots_count}/{len(TARGETS)}\n"
+        f"Интервал проверки: {CHECK_INTERVAL//60} мин",
+        parse_mode="Markdown"
+    )
 
 async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global token_renewal_in_progress
     q = update.callback_query
     await q.answer()
-    state = load_state()
+
     if q.data == "slots":
+        state = load_state()
+        await q.edit_message_text("🔄 Проверяю...")
         results = await check_slots(state.get("token", ""))
         lines = []
         for t in TARGETS:
             v = results.get(t["label"], [])
             if isinstance(v, list) and v:
-                url = f"https://italyvms.com/autoform/?t={state.get('token','')}&lang=ru"
+                url = f"https://italyvms.com/autoform/?t={state.get('token', '')}&lang=ru"
                 lines.append(f"🟢 [{t['label']}]({url}): {', '.join(v)}")
         await q.edit_message_text(
             "\n".join(lines) if lines else "🔴 Свободных мест нет.",
-            parse_mode="Markdown", disable_web_page_preview=True)
-    elif q.data == "subscribe":
-        subs_file = "C:\\vfs_bot\\subscribers.json"
-        try:
-            subs = json.load(open(subs_file, encoding="utf-8")) if os.path.exists(subs_file) else []
-        except Exception:
-            subs = []
-        uid = q.from_user.id
-        if uid not in subs:
-            subs.append(uid)
-            json.dump(subs, open(subs_file, "w", encoding="utf-8"))
-            await q.edit_message_text("✅ Вы подписались!")
-        else:
-            await q.edit_message_text("Вы уже подписаны.")
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+
+    elif q.data == "renew_token":
+        if q.from_user.id != ADMIN_ID:
+            await q.answer("Только для администратора", show_alert=True)
+            return
+        await q.edit_message_text(
+            "🔄 Открываю браузер...\n"
+            "Следи за сообщениями — скажу когда нужно пройти капчу."
+        )
+        if not token_renewal_in_progress:
+            token_renewal_in_progress = True
+            new_token = await get_token_via_playwright(ctx.bot)
+            token_renewal_in_progress = False
+            if new_token:
+                state = load_state()
+                state["token"] = new_token
+                save_state(state)
+                await ctx.bot.send_message(
+                    ADMIN_ID,
+                    f"✅ *Токен успешно обновлён!*\n`{new_token[:40]}...`",
+                    parse_mode="Markdown"
+                )
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
-    log.info("Bot v8 started! JobQueue + Proxy rotation + 2captcha")
+    log.info("Bot v9 started! Полуавтоматическое обновление токена через Playwright")
     app = (Application.builder()
            .token(BOT_TOKEN)
            .build())
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("token", cmd_token))
-    app.add_handler(CommandHandler("check", cmd_check))
+    app.add_handler(CommandHandler("start",  cmd_start))
+    app.add_handler(CommandHandler("token",  cmd_token))
+    app.add_handler(CommandHandler("check",  cmd_check))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    # Запускаем мониторинг через JobQueue — без Conflict!
-    app.job_queue.run_repeating(monitor_job, interval=CHECK_INTERVAL, first=10)
+    app.job_queue.run_repeating(monitor_job, interval=CHECK_INTERVAL, first=15)
 
     app.run_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])
 
