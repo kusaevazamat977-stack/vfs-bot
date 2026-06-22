@@ -279,23 +279,41 @@ async def get_token_via_playwright(bot=None):
                     except Exception:
                         pass
 
-            # ── Polling URL до 5 минут ──
-            log.info("Жду прохождения капчи...")
-            for _ in range(150):
-                await asyncio.sleep(2)
-                token = extract_token_from_url(page.url)
-                if token:
-                    log.info("Токен пойман!")
-                    if bot:
-                        try:
-                            await bot.send_message(ADMIN_ID,
-                                "🎉 *Токен обновлён успешно!*\n"
-                                "Бот продолжает мониторинг. ✅",
-                                parse_mode="Markdown")
-                        except Exception:
-                            pass
-                    await browser.close()
-                    return token
+            # ── Polling: ждём пока токен реально заработает в API ──
+            log.info("Жду прохождения капчи (проверяю API каждые 5 сек)...")
+            current_token = extract_token_from_url(page.url)
+            for i in range(60):  # до 5 минут (60 × 5 сек)
+                await asyncio.sleep(5)
+                # Обновляем токен из URL если изменился
+                new_url_token = extract_token_from_url(page.url)
+                if new_url_token:
+                    current_token = new_url_token
+                if not current_token:
+                    continue
+                # Проверяем токен через реальный API
+                try:
+                    async with httpx.AsyncClient(timeout=10, verify=False) as client:
+                        test_url = (f"https://italyvms.com/vcs/get_nearest.htm"
+                                    f"?center=1&persons=1&urgent=0"
+                                    f"&token={current_token}&lang=ru&vtype=13")
+                        r = await client.get(test_url, headers=get_headers())
+                        resp_text = r.text.strip()
+                        log.info(f"  API test ({i+1}/60): {resp_text[:60]!r}")
+                        # Токен рабочий если ответ НЕ содержит "капчу"
+                        if "капчу" not in resp_text and "captcha" not in resp_text.lower():
+                            log.info("Токен рабочий!")
+                            if bot:
+                                try:
+                                    await bot.send_message(ADMIN_ID,
+                                        "🎉 *Токен обновлён успешно!*\n"
+                                        "Бот продолжает мониторинг. ✅",
+                                        parse_mode="Markdown")
+                                except Exception:
+                                    pass
+                            await browser.close()
+                            return current_token
+                except Exception as e:
+                    log.warning(f"API test error: {e}")
 
             log.warning("Таймаут 5 минут")
             if bot:
