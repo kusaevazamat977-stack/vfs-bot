@@ -195,7 +195,27 @@ async def get_token_via_playwright(bot=None):
                 await browser.close()
                 return token
 
-            # ── Заполняем форму ──
+            # ── Шаг 0: страница с предупреждением (галочки + Далее) ──
+            try:
+                await asyncio.sleep(2)
+                # Ставим все галочки на текущей странице
+                for cb in await page.query_selector_all("input[type='checkbox']"):
+                    if not await cb.is_checked():
+                        await cb.check()
+                        await asyncio.sleep(0.3)
+                        log.info("Поставил галочку на странице предупреждения")
+                # Если есть кнопка Далее — жмём
+                for sel in ["input[type='button'][value*='алее']", "input[type='submit']",
+                            "input[type='button']", "button"]:
+                    btn = await page.query_selector(sel)
+                    if btn:
+                        await btn.click()
+                        await asyncio.sleep(2)
+                        break
+            except Exception as e:
+                log.warning(f"Шаг 0 (галочки): {e}")
+
+            # ── Шаг 1: основная форма ──
             try:
                 await page.wait_for_selector("select[name='center']", timeout=15000)
                 await page.select_option("select[name='center']", "1")
@@ -205,6 +225,7 @@ async def get_token_via_playwright(bot=None):
                 await page.fill("input[name='num_of_person']", "1")
                 await page.fill("input[name='email']", temp_email)
                 await page.fill("input[name='emailcheck']", temp_email)
+                # Галочки согласия
                 for cb in await page.query_selector_all("input[type='checkbox']"):
                     if not await cb.is_checked():
                         await cb.check()
