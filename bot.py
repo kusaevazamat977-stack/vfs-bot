@@ -195,25 +195,57 @@ async def get_token_via_playwright(bot=None):
                 await browser.close()
                 return token
 
-            # ── Шаг 0: страница с предупреждением (галочки + Далее) ──
-            try:
-                await asyncio.sleep(2)
-                # Ставим все галочки на текущей странице
-                for cb in await page.query_selector_all("input[type='checkbox']"):
-                    if not await cb.is_checked():
-                        await cb.check()
-                        await asyncio.sleep(0.3)
-                        log.info("Поставил галочку на странице предупреждения")
-                # Если есть кнопка Далее — жмём
-                for sel in ["input[type='button'][value*='алее']", "input[type='submit']",
-                            "input[type='button']", "button"]:
-                    btn = await page.query_selector(sel)
-                    if btn:
-                        await btn.click()
-                        await asyncio.sleep(2)
+            # ── Шаги 0,0b: страницы с предупреждениями (галочки + Далее) ──
+            # Проходим все страницы с галочками пока не дойдём до основной формы
+            for attempt in range(5):
+                try:
+                    await asyncio.sleep(2)
+                    # Проверяем есть ли галочки на странице
+                    checkboxes = await page.query_selector_all("input[type='checkbox']")
+                    selects    = await page.query_selector_all("select[name='center']")
+
+                    # Если уже на основной форме — выходим из цикла
+                    if selects:
                         break
-            except Exception as e:
-                log.warning(f"Шаг 0 (галочки): {e}")
+
+                    if checkboxes:
+                        for cb in checkboxes:
+                            if not await cb.is_checked():
+                                await cb.check()
+                                await asyncio.sleep(0.3)
+                                log.info(f"Шаг {attempt}: поставил галочку")
+                        # Нажимаем Далее
+                        for sel in ["input[value*='алее']", "input[type='button']",
+                                    "input[type='submit']", "button"]:
+                            btns = await page.query_selector_all(sel)
+                            for btn in btns:
+                                txt = (await btn.get_attribute("value") or
+                                       await btn.inner_text() or "")
+                                if "азад" not in txt.lower():
+                                    await btn.click()
+                                    await asyncio.sleep(2)
+                                    break
+                            else:
+                                continue
+                            break
+                        log.info(f"Шаг {attempt}: нажал Далее")
+                    else:
+                        # Нет галочек и нет основной формы — просто жмём Далее
+                        for sel in ["input[type='button']", "input[type='submit']", "button"]:
+                            btns = await page.query_selector_all(sel)
+                            for btn in btns:
+                                txt = (await btn.get_attribute("value") or
+                                       await btn.inner_text() or "")
+                                if "азад" not in txt.lower():
+                                    await btn.click()
+                                    await asyncio.sleep(2)
+                                    break
+                            else:
+                                continue
+                            break
+                except Exception as e:
+                    log.warning(f"Шаг {attempt} (галочки): {e}")
+                    break
 
             # ── Шаг 1: основная форма ──
             try:
