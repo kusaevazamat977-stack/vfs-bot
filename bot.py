@@ -15,7 +15,8 @@ CHANNEL_ID     = "@SamSebeTur1"
 ADMIN_ID       = 1020509234
 CHECK_INTERVAL = 300
 STATE_FILE     = "C:\\vfs_bot\\last_slots.json"
-MAILTM_API     = "https://api.mail.tm"
+YANDEX_EMAIL    = "kusyaevazilia@yandex.ru"
+YANDEX_PASSWORD = "20708090aza!"   # <-- вставь сам в файле
 
 PROXIES = [
     "http://user409265:y41xol@138.249.26.253:6085",
@@ -77,61 +78,74 @@ def save_state(state):
     except Exception as e:
         log.warning(f"Save state error: {e}")
 
-# ─── ВРЕМЕННАЯ ПОЧТА (mail.tm) ────────────────────────────────────────────────
-async def create_temp_email():
-    """Создаёт временный email через mail.tm. Возвращает (email, jwt) или (None, None)."""
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(f"{MAILTM_API}/domains")
-            domains = r.json().get("hydra:member", [])
-            if not domains:
-                return None, None
-            domain = domains[0]["domain"]
+# ─── YANDEX IMAP — чтение кода подтверждения ─────────────────────────────────
+import imaplib
+import email as emaillib
+from email.header import decode_header
 
-            login    = "vfs" + str(random.randint(10000, 99999))
-            password = "Vfs" + str(random.randint(100000, 999999)) + "!"
-            address  = f"{login}@{domain}"
+def imap_get_latest_code(timeout_sec: int = 120) -> str | None:
+    """
+    Читает последнее письмо с кодом подтверждения через IMAP.
+    Опрашивает ящик каждые 5 секунд до timeout_sec.
+    """
+    import time
+    deadline = time.time() + timeout_sec
+    seen_ids = set()
 
-            r = await client.post(f"{MAILTM_API}/accounts",
-                json={"address": address, "password": password})
-            if r.status_code not in (200, 201):
-                log.warning(f"mail.tm create error: {r.status_code}")
-                return None, None
-
-            r = await client.post(f"{MAILTM_API}/token",
-                json={"address": address, "password": password})
-            jwt = r.json().get("token")
-            if not jwt:
-                return None, None
-
-            log.info(f"Temp email: {address}")
-            return address, jwt
-
-    except Exception as e:
-        log.error(f"create_temp_email error: {e}")
-        return None, None
-
-async def wait_for_code(jwt: str, timeout: int = 120) -> str | None:
-    """Ждёт письмо с кодом. Возвращает код или None."""
-    headers = {"Authorization": f"Bearer {jwt}"}
-    log.info("Жду письмо с кодом подтверждения...")
-    for _ in range(timeout // 5):
-        await asyncio.sleep(5)
+    while time.time() < deadline:
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                r = await client.get(f"{MAILTM_API}/messages", headers=headers)
-                msgs = r.json().get("hydra:member", [])
-                if msgs:
-                    mid = msgs[0]["id"]
-                    r2  = await client.get(f"{MAILTM_API}/messages/{mid}", headers=headers)
-                    body = r2.json().get("text", "") + r2.json().get("html", "")
-                    codes = re.findall(r"\b(\d{4,8})\b", body)
-                    if codes:
-                        log.info(f"Код найден: {codes[0]}")
-                        return codes[0]
+            mail = imaplib.IMAP4_SSL("imap.yandex.ru", 993)
+            mail.login(YANDEX_EMAIL, YANDEX_PASSWORD)
+            mail.select("INBOX")
+
+            # Ищем непрочитанные письма от italyvms
+            _, data = mail.search(None, 'UNSEEN')
+            ids = data[0].split()
+
+            for mid in reversed(ids):  # сначала свежие
+                if mid in seen_ids:
+                    continue
+                seen_ids.add(mid)
+                _, msg_data = mail.fetch(mid, "(RFC822)")
+                raw = msg_data[0][1]
+                msg = emaillib.message_from_bytes(raw)
+
+                # Собираем текст письма
+                body = ""
+                if msg.is_multipart():
+                    for part in msg.walk():
+                        ct = part.get_content_type()
+                        if ct in ("text/plain", "text/html"):
+                            try:
+                                body += part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                            except Exception:
+                                pass
+                else:
+                    try:
+                        body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+                    except Exception:
+                        pass
+
+                # Ищем код (4-8 цифр)
+                codes = re.findall(r"\b(\d{4,8})\b", body)
+                if codes:
+                    log.info(f"Код из письма: {codes[0]}")
+                    mail.logout()
+                    return codes[0]
+
+            mail.logout()
         except Exception as e:
-            log.warning(f"mail.tm poll error: {e}")
+            log.warning(f"IMAP error: {e}")
+
+        time.sleep(5)
+
+    log.warning("IMAP: код не найден за отведённое время")
     return None
+
+async def wait_for_code_imap(timeout: int = 120) -> str | None:
+    """Асинхронная обёртка для IMAP чтения кода."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, imap_get_latest_code, timeout)
 
 # ─── PLAYWRIGHT ───────────────────────────────────────────────────────────────
 def extract_token_from_url(url):
@@ -149,17 +163,13 @@ async def get_token_via_playwright(bot=None):
     """
     log.info("Playwright: создаю временный email...")
 
-    temp_email, mail_jwt = await create_temp_email()
-    if not temp_email:
-        temp_email = f"vfs{random.randint(1000,9999)}@proton.me"
-        mail_jwt = None
-        log.warning("Временный email не создан, использую заглушку")
+    temp_email = YANDEX_EMAIL
 
     if bot:
         try:
             await bot.send_message(ADMIN_ID,
                 f"🔄 *Токен истёк — запускаю обновление...*\n\n"
-                f"📧 Временный email: `{temp_email}`\n"
+                f"📧 Email: `{temp_email}`\n"
                 f"Открываю браузер и заполняю форму автоматически.\n\n"
                 f"⏳ Жди следующего сообщения...",
                 parse_mode="Markdown")
@@ -213,19 +223,19 @@ async def get_token_via_playwright(bot=None):
             page_text = await page.inner_text("body")
             needs_code = any(w in page_text.lower() for w in ["код", "code", "подтвер", "confirm"])
 
-            if needs_code and mail_jwt:
-                log.info("Нужен код подтверждения — жду письмо...")
+            if needs_code:
+                log.info("Нужен код подтверждения — жду письмо на Яндекс...")
                 if bot:
                     try:
                         await bot.send_message(ADMIN_ID,
                             f"📬 *Форма заполнена!*\n\n"
                             f"Жду код подтверждения на:\n`{temp_email}`\n\n"
-                            f"Читаю письмо автоматически... ⏳",
+                            f"Читаю письмо через IMAP автоматически... ⏳",
                             parse_mode="Markdown")
                     except Exception:
                         pass
 
-                code = await wait_for_code(mail_jwt, timeout=120)
+                code = await wait_for_code_imap(timeout=120)
                 if code:
                     # Вводим код в поле
                     for code_sel in ["input[name='code']", "input[name='confirm']",
